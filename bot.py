@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 WAITING = 1
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-DATABASE_URL = os.environ["postgresql://photo_bot_db_user:HCokeqvnZNTJJ6TuMEih70Bbol0elrDh@dpg-d5n0jon5r7bs73dejl90-a/photo_bot_db"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)

@@ -1,7 +1,7 @@
 import os
-import sqlite3
 import logging
 import requests
+import psycopg2
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes,
@@ -11,25 +11,25 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 WAITING = 1
 
-GROUP_CHAT_ID = os.environ["-3620190280"]
 TELEGRAM_TOKEN = os.environ["8428812457:AAElCXBB2mVxj4qvZO_5ZEXgzJdAP3gHdTE"]
+DATABASE_URL = os.environ["postgresql://photo_bot_db_user:HCokeqvnZNTJJ6TuMEih70Bbol0elrDh@dpg-d5n0jon5r7bs73dejl90-a/photo_bot_db"]
 
 def init_db():
-    conn = sqlite3.connect("/tmp/photos.db")
-    c = conn.cursor()
-    c.execute("""
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS photos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             file_id TEXT,
-            lat REAL,
-            lon REAL,
+            lat DOUBLE PRECISION,
+            lon DOUBLE PRECISION,
             address TEXT,
-            archived_message_id INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
+    cur.close()
     conn.close()
 
 def reverse_geocode(lat, lon):
@@ -40,94 +40,115 @@ def reverse_geocode(lat, lon):
             headers={"User-Agent": "PhotoBot/1.0 (sniki1462@gmail.com)"},
             timeout=5
         )
-        return r.json().get("display_name", f"{lat}, {lon}") if r.ok else f"{lat}, {lon}"
-    except:
+        if r.ok:
+            return r.json().get("display_name", f"{lat}, {lon}")
         return f"{lat}, {lon}"
+    except Exception as e:
+        return f"{lat}, {lon} (ошибка)"
 
 async def start(update: Update, context):
     kb = [[KeyboardButton("📍 Отправить геопозицию", request_location=True)]]
     await update.message.reply_text(
-        "Нажмите кнопку, чтобы отправить геопозицию, затем — фото.",
+        "Привет! Нажмите кнопку, чтобы отправить геопозицию, затем — фото.",
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True, one_time_keyboard=True)
     )
     return WAITING
 
 async def handle_input(update: Update, context):
     ud = context.user_data
+
     if update.message.location:
-        lat, lon = update.message.location.latitude, update.message.location.longitude
-        ud.update({"lat": lat, "lon": lon, "address": reverse_geocode(lat, lon)})
-        await update.message.reply_text(f"📍 Адрес:\n{ud['address']}\nТеперь отправьте фото.")
+        lat = update.message.location.latitude
+        lon = update.message.location.longitude
+        address = reverse_geocode(lat, lon)
+        ud.update({"lat": lat, "lon": lon, "address": address})
+        await update.message.reply_text(f"📍 Адрес:\n{address}\nТеперь отправьте фото.")
         return WAITING
+
     elif update.message.photo:
         if "address" not in ud:
             await update.message.reply_text("Сначала отправьте геопозицию!")
             return WAITING
+
         photo = update.message.photo[-1]
         file_id = photo.file_id
-        addr = ud["address"]
+        address = ud["address"]
         user_id = update.effective_user.id
-        msg = await context.bot.send_photo(GROUP_CHAT_ID, file_id, caption=f"📍 {addr}\n👤 {user_id}")
-        conn = sqlite3.connect("/tmp/photos.db")
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO photos (user_id, file_id, lat, lon, address, archived_message_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, file_id, ud["lat"], ud["lon"], addr, msg.message_id)
+
+        # Сохраняем в PostgreSQL
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO photos (user_id, file_id, lat, lon, address) VALUES (%s, %s, %s, %s, %s)",
+            (user_id, file_id, ud["lat"], ud["lon"], address)
         )
         conn.commit()
+        cur.close()
         conn.close()
-        await update.message.reply_text("✅ Сохранено!")
+
+        await update.message.reply_text("✅ Фото сохранено!")
         ud.clear()
         return WAITING
+
     else:
         await update.message.reply_text("Отправьте геопозицию или фото.")
         return WAITING
 
 async def gallery(update: Update, context):
-    conn = sqlite3.connect("/tmp/photos.db")
-    c = conn.cursor()
-    c.execute("SELECT file_id, address FROM photos ORDER BY timestamp DESC LIMIT 10")
-    rows = c.fetchall()
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute("SELECT file_id, address FROM photos ORDER BY timestamp DESC LIMIT 10")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
+
     if not rows:
         await update.message.reply_text("Архив пуст.")
         return
-    for fid, addr in rows:
+
+    for file_id, addr in rows:
         try:
-            await update.message.reply_photo(fid, caption=f"📍 {addr}")
-        except:
-            await update.message.reply_text(f"❌ Недоступно: {addr}")
+            await update.message.reply_photo(photo=file_id, caption=f"📍 {addr}")
+        except Exception:
+            await update.message.reply_text(f"❌ Фото недоступно: {addr}")
 
 async def search(update: Update, context):
     if not context.args:
-        await update.message.reply_text("Используйте: /search <адрес>")
+        await update.message.reply_text("Используйте: /search <часть адреса>")
         return
-    q = " ".join(context.args).lower()
-    conn = sqlite3.connect("/tmp/photos.db")
-    c = conn.cursor()
-    c.execute("SELECT file_id, address FROM photos WHERE LOWER(address) LIKE ?", (f"%{q}%",))
-    rows = c.fetchall()
+    query = " ".join(context.args).lower()
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    cur.execute("SELECT file_id, address FROM photos WHERE LOWER(address) LIKE %s", (f"%{query}%",))
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
+
     if not rows:
         await update.message.reply_text("Ничего не найдено.")
         return
-    for fid, addr in rows:
+
+    for file_id, addr in rows:
         try:
-            await update.message.reply_photo(fid, caption=f"📍 {addr}")
-        except:
+            await update.message.reply_photo(photo=file_id, caption=f"📍 {addr}")
+        except Exception:
             await update.message.reply_text(f"Фото утеряно: {addr}")
 
 def main():
     init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={WAITING: [MessageHandler(filters.LOCATION | filters.PHOTO, handle_input)]},
         fallbacks=[CommandHandler("start", start)]
     )
+
     app.add_handler(conv)
     app.add_handler(CommandHandler("gallery", gallery))
     app.add_handler(CommandHandler("search", search))
+
     app.run_polling()
 
 if __name__ == "__main__":

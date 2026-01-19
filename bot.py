@@ -11,8 +11,8 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 WAITING = 1
 
-GROUP_CHAT_ID = os.environ["ARCHIVE_CHAT_ID"]
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+GROUP_CHAT_ID = os.environ["-3620190280"]
+TELEGRAM_TOKEN = os.environ["8428812457:AAElCXBB2mVxj4qvZO_5ZEXgzJdAP3gHdTE"]
 
 def init_db():
     conn = sqlite3.connect("/tmp/photos.db")
